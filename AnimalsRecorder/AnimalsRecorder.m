@@ -1,4 +1,4 @@
-classdef WormsRecorder < handle
+classdef AnimalsRecorder < handle
     %WORMSRECORDER Summary of this class goes here
     %   Detailed explanation goes here
     properties
@@ -21,7 +21,7 @@ classdef WormsRecorder < handle
         onlineParameters
     end
     methods
-        function WR = WormsRecorder(micName, moviesDir, exposure, fixedParameters)
+        function WR = AnimalsRecorder(micName, moviesDir, exposure, fixedParameters)
             WR.inputVideo = videoinput('qimaging', 1, 'MONO8_2560x1920');
             src = getselectedsource(WR.inputVideo);
             src.Exposure = exposure;
@@ -40,7 +40,10 @@ classdef WormsRecorder < handle
                 fixedParameters.chemoV = 10;
             end
             
-            fixedParameters.bleachTime = datevec(guiDatePicker('1-Jan-2014'));
+            fixedParameters.experimentDate = date;
+            % This line is relevant for worm breeders.
+            %fixedParameters.bleachTime = datevec(guiDatePicker('1-Jan-2014'));
+            
             WR.fixedParameters = fixedParameters;
         end
         
@@ -78,8 +81,8 @@ classdef WormsRecorder < handle
             obj.sTime = clock();
             start(obj.inputVideo);
             
-            hoursSinceBleach = etime(clock, obj.fixedParameters.bleachTime) / 60 / 60;
-            obj.addParameter('HoursSinceBleach', hoursSinceBleach);
+            %hoursSinceBleach = etime(clock, obj.fixedParameters.bleachTime) / 60 / 60;
+            %obj.addParameter('HoursSinceBleach', hoursSinceBleach);
         end
         
         function endVideo(obj)
