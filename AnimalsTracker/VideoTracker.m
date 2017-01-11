@@ -47,6 +47,21 @@ classdef VideoTracker < handle
         
         % Name.
         name
+        
+        % How many steps should we allow to predict
+        ALLOW_PRED_STEPS = 10
+        
+        % Learning steps period
+        LEARNING_STEPS = 10
+        
+        % on/off prediction
+        SHOULD_PREDICT = true
+        
+        % Should perform ML object recognition.
+        SHOULD_ML = true;
+        
+        % Empty track scaffhold.
+        EMPTY_TRACK;
     end
     
     methods
@@ -71,18 +86,26 @@ classdef VideoTracker < handle
             
             % Saving the file name.
             VT.videoFileName = fileName;
-
-            VT.initialize(numberOfFrames);
-
+            
+            % Intializing.
+            VT.initialize(numberOfFrames);            
         end
         
         function initialize(obj, numberOfFrames)
+            HIGH_FRAME_RATE = 1;
+            
             % Initialize the video object using a file name from disk.
             obj.inputFile = VideoReader(obj.videoFileName);
             
             if (nargin < 2)
+                
+                if (HIGH_FRAME_RATE)
+                    obj.numberOfFrames = ...
+                        floor(obj.inputFile.FrameRate * obj.inputFile.Duration);
+                else
                 % The number of frames in the video
                 obj.numberOfFrames = obj.inputFile.NumberOfFrames;
+                end
             else
                 % If we have to calculate the number of frames by ourselves
                 if isempty(obj.inputFile.NumberOfFrames)
@@ -95,7 +118,9 @@ classdef VideoTracker < handle
                 obj.numberOfFrames = floor(min(fileNumberOfFrames, numberOfFrames));
             end
             
-            obj.flatFieldMat = obj.initializeFlatField();
+            if (~HIGH_FRAME_RATE)
+                obj.flatFieldMat = obj.initializeFlatField();
+            end
         end
         
         % Setting the position of the chemoattractant points.
@@ -145,6 +170,10 @@ classdef VideoTracker < handle
             
             %frame = wiener2(read(obj.inputFile, frameIndex), [5 5]);
             frame = read(obj.inputFile, frameIndex);
+            
+            %DEBUG
+            frame = uint8(frame);
+            %DEBUG
                         
             % If we have 3 RGB channels.
             if (size(frame,3) == 3)
@@ -309,6 +338,7 @@ classdef VideoTracker < handle
             
             obj.learner.meanCentroid = mean(allFeatures,1);
             obj.learner.covMat = eye(size(allFeatures,2)) .* cov(allFeatures);
+            
             obj.learner.invCov = obj.learner.covMat / eye(length(obj.learner.covMat));
             
             % Calculating Mahalanobis distance for all samples.
@@ -320,7 +350,8 @@ classdef VideoTracker < handle
             mDistances = diag(mDistances);
             mDistances = sqrt(mDistances);
             
-            obj.learner.threshold = quantile(mDistances,0.98);
+            %
+            obj.learner.threshold = quantile(mDistances,0.88);
         end
         
         % Classifying features of a new frame.
@@ -339,7 +370,7 @@ classdef VideoTracker < handle
             
             %classifiedCorrect = (pdist2(featuresToClassify, obj.learner.meanCentroid)) < obj.learner.threshold;
             
-            %             % Mahalanobis Distance
+            % Mahalanobis Distance
             meanMat = repmat(obj.learner.meanCentroid, size(featuresToClassify,1), 1);
             distanceFromMean = featuresToClassify - meanMat;
             
@@ -667,13 +698,13 @@ classdef VideoTracker < handle
         
         %
         
-        function [] = performTracking3(obj,trainingFeatures, frameThresholds, imgH)
+        function [tracks,tracksStats] = performTracking3(obj,trainingFeatures, frameThresholds, imgH)
             
             % Learning the training features.
             obj.learn2(trainingFeatures);
-            
-            % Initialize the tracks
-            emptyTrack = struct('lastCoordinates',[],...
+
+            % Initializing the empty tracks.
+            obj.EMPTY_TRACK  = struct('lastCoordinates',[],...
                 'properties',zeros(obj.numberOfFrames,size(trainingFeatures,2)),...
                 'lastStepSize',[],...
                 'stepSizes',zeros(1,obj.numberOfFrames),...
@@ -683,19 +714,22 @@ classdef VideoTracker < handle
                 'isActive',false,...
                 'isUsed',0,...
                 'state', zeros(4,1),...
+                'previousState', zeros(4,1),...
                 'predicted',0,...
                 'numberOfSteps', double(0));
-            
-            obj.tracks = repmat(emptyTrack,8000,1);
+            obj.tracks = repmat(obj.EMPTY_TRACK,8000,1);
             
             % Counter for tracks.
             numberOfTracks = 0;
+            
+            % Savign statistics regarding the tracking process.
+            tracksStats = zeros(obj.numberOfFrames,2);
             
             % Running over all of the frames
             for i=1:obj.numberOfFrames
             %for i=45000:50500
             %for i=1:1440
-            %for i=1:250
+            % for i=1:150
                 %for i=1:1000
                 % A matrix with centroid position and area.
                 [centroids,frameProperties,extermas,idxs] = obj.extractFeatures2(i, frameThresholds(i));
@@ -710,10 +744,20 @@ classdef VideoTracker < handle
                     end
                 end
                 
-                % Accepting entites
-                acceptingIndices = obj.classify2(frameProperties);
+                % Accepting entites. Classifying entites given the training
+                % set.
+                if (obj.SHOULD_ML)
+                    acceptingIndices = obj.classify2(frameProperties);
+                else
+                    acceptingIndices = logical(ones(1, size(frameProperties,1)));
+                end
+                
+                % Saving stats about the tracking process.
+                tracksStats(i,:) = [size(frameProperties,1),sum(acceptingIndices)];
+                
                 relevantCentroids = centroids(acceptingIndices,:);
                 relevantProperties = frameProperties(acceptingIndices,:);
+
                 
                 % Here we write which tracks are assigned to each entity.
                 entityRegistered = cell(size(relevantProperties,1),1);
@@ -721,7 +765,7 @@ classdef VideoTracker < handle
                 % Going over the active tracks.
                 for j=1:length(activeTracks)
                     %Removing exceedingly long predicted tracks
-                    if (activeTracks(j).predicted > 3)
+                    if (obj.SHOULD_PREDICT && activeTracks(j).predicted > obj.ALLOW_PRED_STEPS)
                         activeTracks(j).isActive = 0;
                         obj.tracks(activeTracks(j).id) = activeTracks(j);
                         continue;
@@ -740,12 +784,18 @@ classdef VideoTracker < handle
                     %    continue;
                     %end
                     
-                    % We want to limit the step size.
-                    maximalBodySize = 50;%length(idxs{entityId});
-                    stepFactor = 1;
-                    if (isempty(minDist) || (minDist > maximalBodySize * stepFactor) || (isempty(relevantProperties)))
+                    % Calculate step probability.
+                    stepProbability = obj.getStepProbability(activeTracks(j), minDist);
+                    
+                    if (isempty(minDist) || (stepProbability < eps) || (isempty(relevantProperties)))
+                    %if (isempty(minDist) || (minDist > maximalBodySize * stepFactor) || (isempty(relevantProperties)))
+                    %if (isempty(minDist)  || (isempty(relevantProperties)))
                         % Step is too big - trying to predict step.
-                        if (activeTracks(j).numberOfSteps > 2 && (activeTracks(j).predicted < 3))
+                        if (obj.SHOULD_PREDICT && ...
+                            any(activeTracks(j).state ~= 0) && ...
+                            activeTracks(j).numberOfSteps > 2 && ...
+                            (activeTracks(j).predicted <= obj.ALLOW_PRED_STEPS))
+                            
                             activeTracks(j) = obj.predictTrack(activeTracks(j));
                             activeTracks(j).predicted = activeTracks(j).predicted + 1;
                         else
@@ -764,24 +814,27 @@ classdef VideoTracker < handle
                     activeTracks(j).path(activeTracks(j).numberOfSteps + 1,:) = [i relevantCentroids(entityId,:) 0];
                     %activeTracks(j).predicted = 0;
                     
+                    
+                    % Increasing step numbers.
+                    activeTracks(j).numberOfSteps = activeTracks(j).numberOfSteps + 1;
+
                     % Updating the state
+                    activeTracks(j).previousState = activeTracks(j).state;
+                    
                     activeTracks(j).state = zeros(4,1);
                     activeTracks(j).state(1:2) = relevantCentroids(entityId,:);
                     % Calculating the veolocity for the state.
                     if (activeTracks(j).numberOfSteps > 1)
                         lastVector = activeTracks(j).path(activeTracks(j).numberOfSteps,2:3) ...
                             - activeTracks(j).path((activeTracks(j).numberOfSteps-1),2:3);
-                        
-                        % Vx
-                        activeTracks(j).state(3) = dot([0 1], lastVector);
+
                         % Vy
-                        activeTracks(j).state(4) = dot([1 0], lastVector);
+                        activeTracks(j).state(3) = dot([1 0], lastVector);
+
+                        % Vx
+                        activeTracks(j).state(4) = dot([0 1], lastVector);
                     end
-                    
-                    
-                    % Increasing step numbers.
-                    activeTracks(j).numberOfSteps = activeTracks(j).numberOfSteps + 1;
-                    
+                                        
                     % Saving which track was assigned to which entity. To
                     % solve amibiguities.
                     entityRegistered{entityId} = [entityRegistered{entityId} activeTracks(j).id];
@@ -845,22 +898,72 @@ classdef VideoTracker < handle
             % Clear all empty tracks.
             obj.tracks([obj.tracks.id] == 0) = [];
             
-            % Clear predicted suffix.
-            predictedSuffixTracks = obj.tracks([obj.tracks.predicted] == 3);
-            for predSuffTrack = predictedSuffixTracks'
-                predSuffTrack.path = predSuffTrack.path(1:end-3,:);
-                predSuffTrack.properties = predSuffTrack.properties(1:end-3,:);
-                predSuffTrack.numberOfSteps = predSuffTrack.numberOfSteps - 3;
-                obj.setTrackById(predSuffTrack.id, predSuffTrack);
-            end
             
-            % Clear empty allocation within tracks.
             for i=1:length(obj.tracks)
+                % Clear empty allocation within tracks.
                 % Cleaning the track.
                 currentTrack = obj.tracks(i);
                 currentTrack = obj.cleanTrack(currentTrack);
                 obj.setTrackById(currentTrack.id, currentTrack);
+                                
+                % Removing predicted suffixes.
+                predictedVector = obj.tracks(i).path(:,4);
+                predictedVector = flipud(predictedVector);
                 
+                firstNotPredicted = find(predictedVector == 0,1,'first');
+                if (firstNotPredicted ~= 1)
+                    obj.tracks(i).path = obj.tracks(i).path(1:(end - firstNotPredicted + 1),:);
+                    obj.tracks(i).numberOfSteps = obj.tracks(i).numberOfSteps - firstNotPredicted + 1;
+                end
+            end
+            
+                       
+            
+            %Tracks filtering
+            disp('Filtering tracks.');
+            
+            % Clear unimportant tracks.
+            %pathPolyArea = arrayfun(@(t) polyarea(t.path(:,2), t.path(:,3)), obj.tracks);
+            
+            % Removing 2 points (and less) tracks.
+            % DEBUG - UNCOMMENT!!!!!!
+            obj.tracks(arrayfun(@(t) size(t.path,1), obj.tracks) <=2) = [];
+            
+            % Prepare steps sizes
+            stepSizes = cell(1, length(obj.tracks));
+            numberOfTracks = length(obj.tracks);
+            
+            for i=1:numberOfTracks
+                currentPath = obj.tracks(i).path(:,2:3);
+                currentSteps = diff(currentPath);
+                stepSizes{i} = sqrt(currentSteps(:,1).^2 + currentSteps(:,2).^2);
+            end
+            
+            stepSizes = cell2mat(stepSizes');
+            stepThreshold = quantile(stepSizes, 0.997);
+            
+            tracksToRemove = zeros(1,length(obj.tracks));
+            splittedTracks = [];
+            lastId = obj.tracks(end).id;
+            
+            for i=1:numberOfTracks
+                currrentTrack = obj.tracks(i);
+                
+                newSplittedTracks = obj.splitTrack(currrentTrack, stepThreshold, lastId);
+                
+                if (~isempty(newSplittedTracks))
+                    
+                    splittedTracks = [splittedTracks; newSplittedTracks];
+                    tracksToRemove(i) = 1;
+                    lastId = splittedTracks(end).id;
+                end
+            end
+            
+            obj.tracks(logical(tracksToRemove)) = [];
+            obj.tracks = [obj.tracks;splittedTracks];
+            
+            
+            for i=1:numberOfTracks
                 % Setting the Chemoattractant cords.
                 obj.tracks(i).chemoCords = obj.chemoCords;
                 
@@ -869,23 +972,82 @@ classdef VideoTracker < handle
                 
                 % Saving the name of the video
                 obj.tracks(i).name = obj.name;
+                
+                
+                % Returning the created tracks.
+                tracks = obj.tracks;
             end
             
+            % Removing fuzzy initial phase of tracks.
+%             for i=1:length(obj.tracks)
+%                 currentPath = obj.tracks(i).path(:,2:3);
+%                 
+%                 currentSteps = diff(currentPath);
+%                 currentStepsSizes = sqrt(currentSteps(:,1).^2 + currentSteps(:,2).^2);
+%                 
+%                 if (length(currentSteps) < obj.LEARNING_STEPS)
+%                     continue;
+%                 end
+%                 
+%                 % Getting rid of still steps.
+%                 currentStepsSizes = currentStepsSizes(currentStepsSizes ~= 0);
+%                 
+%                 initialPhase = currentStepsSizes(1:obj.LEARNING_STEPS);
+%                 secondaryPhase = currentStepsSizes(obj.LEARNING_STEPS:length(currentStepsSizes));
+%                                 
+%                 [~,p] = ttest2(initialPhase, secondaryPhase,'tail','right');
+%                 
+%                 if (p < 10e-6)
+%                     obj.tracks(i).path = obj.tracks(i).path((obj.LEARNING_STEPS + 1):end,:);
+%                     obj.tracks(i).numberOfSteps = obj.tracks(i).numberOfSteps - obj.LEARNING_STEPS;
+%                 elseif any(find(currentStepsSizes > stepThreshold))
+%                     startPos = find(currentStepsSizes > stepThreshold,1,'last');
+%                     endPos = size(currentPath,1);
+%                     
+%                     obj.tracks(i).path = obj.tracks(i).path(startPos:endPos,:);
+%                     obj.tracks(i).numberOfSteps = endPos - startPos;
+%                     
+%                 end
+% 
+%             end
             
-            % Clear unimportant tracks.
-            pathPolyArea = arrayfun(@(t) polyarea(t.path(:,2), t.path(:,3)), obj.tracks);
-            
-            % Removing 2 points (and less) tracks.
-            % DEBUG - UNCOMMENT!!!!!!
-            obj.tracks(pathPolyArea < 80) = [];
-            
-            %convHulls = arrayfun(@(t) convhull(t.path(:,2:3)),obj.tracks,'UniformOutput',false);
-            %polys = arrayfun(@(i) obj.tracks(i).path(convHulls{i},2:3),1:length(obj.tracks),'UniformOutput',false);
-            %areas = cellfun(@(p) polyarea(p(:,1), p(:,2)), polys);
-            
-            %obj.tracks(areas < 50) = [];
         end
         
+        function splittedTracks = splitTrack(obj, trackToSplit, threshold, lastId)
+            currentPath = trackToSplit.path(:,2:3);
+            steps = diff(currentPath);
+            stepSizes = sqrt(steps(:,1).^2 + steps(:,2).^2);
+            stepSizes = stepSizes(:);
+            
+            weirdSteps = find(stepSizes > threshold) + 1;
+            
+            if (isempty(weirdSteps))
+                splittedTracks = [];
+                return;
+            end
+            
+            splitPoses = [1; weirdSteps ;size(currentPath,1)];
+            splitPoses = min(splitPoses, trackToSplit.numberOfSteps);
+            
+            currentPos = 1;
+            currentId = lastId + 1;
+            count = 1;
+            
+            splittedTracks = repmat(obj.EMPTY_TRACK,length(splitPoses) - 1,1);
+            while (currentPos ~= splitPoses(end))
+                
+                if ((splitPoses(count + 1) - currentPos - 1) > 0)
+                    splittedTracks(count).id = currentId;
+                    splittedTracks(count).path = trackToSplit.path(((currentPos)+1):(splitPoses(count + 1)-1),:);
+                    splittedTracks(count).numberOfSteps = splitPoses(count + 1) - currentPos  - 1;
+                end
+                currentId = currentId  + 1;
+                count = count + 1;
+                currentPos = splitPoses(count);
+            end
+            
+            splittedTracks = splittedTracks([splittedTracks.numberOfSteps] > 0);
+        end
         
         % Process Tracking - Alternate function
         function performTracking2(obj, wormProperties, showProgress, gaussianStd, tolerance)
@@ -1089,6 +1251,22 @@ classdef VideoTracker < handle
             end
         end
         
+        function probability = getStepProbability(obj, track, newStep)
+            MINIMAL_TRJ_SIZE = 5;
+            
+            if (track.numberOfSteps < MINIMAL_TRJ_SIZE)
+                probability = 1;
+            else    
+                path = track.path(1:track.numberOfSteps,2:3);
+            
+                diffPath = diff(path);
+                stepSizes = sqrt(diffPath(:,1).^2 + diffPath(:,2).^2);
+            
+                nonZeroStepSizes = stepSizes(stepSizes ~= 0);
+                probability = normpdf(newStep, mean(nonZeroStepSizes), std(nonZeroStepSizes));
+            end
+        end
+        
         % Return tracks by their id.
         function tracks = getTracksById(obj,ids)
             %trackIndices = arrayfun(@(track) sum(ids == track.id) > 0, obj.tracks);
@@ -1119,66 +1297,109 @@ classdef VideoTracker < handle
                     obj.setTrackById(currentTrack.id, currentTrack);
                     continue;
                 end
-                
+                                
                 % Getting the ambiguis tracks
                 ambTracks = obj.getTracksById(ambiguisTracksIds);
                 
+                % Getting rid of small tracks.
                 % Here we store the tracks we will eventually close.
                 % Short tracks, predicted tracks.
                 tracksToStopIds = zeros(1,length(ambTracks));
-                tracksToStopIds([ambTracks.numberOfSteps] <=3) = 1;
-                tracksToStopIds([ambTracks.predicted] > 0) = 1;
                 
-                tracksToStop = ambTracks(logical(tracksToStopIds));
+                % First deletion: small tracks.
+                tracksToStopIds([ambTracks.numberOfSteps] <= obj.LEARNING_STEPS) = 1;
+                %tracksToStopIds([ambTracks.predicted] > 2) = 1;
+                
+                
+                %tracksToStop = ambTracks(logical(tracksToStopIds));
+                
+                %for trackToStop=tracksToStop'
+                %    trackToStop.path(trackToStop.numberOfSteps,:) = [0 0 0 0];
+                %    trackToStop.stepSizes(trackToStop.numberOfSteps) = 0;
+                %    trackToStop.numberOfSteps = trackToStop.numberOfSteps - 1;
+                %    trackToStop.isActive = 0;
+                    
+                %    obj.setTrackById(trackToStop.id, trackToStop);
+                %end
+                
+                % Getting rid of tracks we've stopped.
+                %ambTracks(logical(tracksToStopIds)) = [];
+                                
+                
+                % Second del: Getting rid of weird steps.
+                % Here we store the tracks we will eventually close.
+                % Short tracks, predicted tracks.                
+                probVals = zeros(1,length(ambTracks));
+                for j=1:length(ambTracks)
+                    
+                    % if the track was already scheduled to stop.
+                    if (tracksToStopIds(j) == 1)
+                        continue;
+                    end
+                    
+                    t = ambTracks(j);
+                    currentPath = t.path(1:t.numberOfSteps,2:3);
+                    steps = diff(currentPath);
+                    stepSizes = sqrt(steps(:,1).^2 + steps(:,2).^2);
+                    lastStep = stepSizes(end);
+                    
+                    tempTrack = t;
+                    tempTrack.path = tempTrack.path;
+                    tempTrack.path(t.numberOfSteps,:) = 0;
+                    tempTrack.numberOfSteps = tempTrack.numberOfSteps - 1;
+                    
+                    probVals(j) = obj.getStepProbability(tempTrack, lastStep);
+                end
+                
+                tracksToStopIds = tracksToStopIds | (probVals < (max(probVals) / 10));
+                
+                
+                % Taking care of "deleted" tracks.
+                tracksToStop = ambTracks(tracksToStopIds);
                 
                 for trackToStop=tracksToStop'
                     trackToStop.path(trackToStop.numberOfSteps,:) = [0 0 0 0];
+                    
+                    % Trimming.
                     trackToStop.stepSizes(trackToStop.numberOfSteps) = 0;
                     trackToStop.numberOfSteps = trackToStop.numberOfSteps - 1;
-                    trackToStop.isActive = 0;
+                    trackToStop.state = trackToStop.previousState;
+                    
+                    if (obj.SHOULD_PREDICT && any(trackToStop.state ~= 0) && trackToStop.predicted == 0)
+                        trackToStop = obj.predictTrack(trackToStop);
+                        trackToStop.predicted = trackToStop.predicted + 1;
+                    else
+                        trackToStop.isActive = 0;
+                    end
                     
                     obj.setTrackById(trackToStop.id, trackToStop);
                 end
                 
-                % Getting rid of tracks we've stopped.
-                ambTracks(logical(tracksToStopIds)) = [];
+                % The unresolve ambigouis tracks.
+                ambTracks = ambTracks(~tracksToStopIds);
                 
-                % If no more tracks left.
-                if (isempty(ambTracks))
-                    continue;
-                end
-                
-                
-                % Getting the index of the track with the shortest step
-                [minimalStepSize,bestCandidate] = min([ambTracks.lastStepSize]);
-                tracksToPredictIds = zeros(size(ambTracks));
-                
-                if (~isempty(minimalStepSize))
-                    
-                    % Adding tracks that are their last step is too big.
-                    tracksToPredictIds([ambTracks.lastStepSize] > minimalStepSize) = 1;
-                end
-                
-                tracksToPredict = ambTracks(logical(tracksToPredictIds));
-                
-                % Disabling losing tracks, % and removing their last step.
-                for trackToPredict=tracksToPredict'
-                    
-                    if (trackToPredict.numberOfSteps > 2 && trackToPredict.predicted < 3)
+                if (length(ambTracks) ~= 1)                
+                    for trackToPredict=ambTracks'    
+                        % Trimming.
                         trackToPredict.path(trackToPredict.numberOfSteps,:) = [0 0 0 0];
-                        trackToPredict.stepSizes(trackToPredict.numberOfSteps) = 0;
                         trackToPredict.numberOfSteps = trackToPredict.numberOfSteps - 1;
+                        trackToPredict.state = trackToPredict.previousState;
+
+                        % Predicting.
+                        if (obj.SHOULD_PREDICT && any(trackToPredict.state ~= 0) && trackToPredict.predicted < obj.ALLOW_PRED_STEPS)
+                            trackToPredict = obj.predictTrack(trackToPredict);
+                            trackToPredict.predicted = trackToPredict.predicted + 1;
+                        else
+                            trackToPredict.isActive = 0;
+                        end
                         
-                        predictedTrack = obj.predictTrack(trackToPredict);
-                        predictedTrack.predicted = predictedTrack.predicted + 1;
-                        
-                        obj.setTrackById(predictedTrack.id, predictedTrack);
+                        obj.setTrackById(trackToPredict.id, trackToPredict);
                     end
-                end
+                else
+                    % Stopping prediction.
+                    ambTracks(1).predicted = 0;                    
+                end   
                 
-                % Setting the best candidate.
-                ambTracks(bestCandidate).predicted = 0;
-                obj.setTrackById(ambTracks(bestCandidate).id, ambTracks(bestCandidate));
                 
             end
         end
@@ -1298,6 +1519,7 @@ classdef VideoTracker < handle
         function viewTracks(obj,tracks, frameRange, showCenterOfMass, videoSavePath, showLabels, hideTracks, scale)
             
             saveVideo = true;
+            tracks = tracks(:);
             
             if (nargin < 7)
                 hideTracks = false;
@@ -1382,6 +1604,9 @@ classdef VideoTracker < handle
             
             % Going over the frame range.
             for i=frameRange(1):frameRange(2)
+                % Logging
+                disp(['Frame: ' num2str(i)]);
+                
                 frame = obj.getRawFrame(i);
                 
                 set(imgH, 'CData', frame);
@@ -1398,10 +1623,10 @@ classdef VideoTracker < handle
                 handles = [];
                 if (hideTracks == false)
                     handles = zeros(length(relevantTracksIds) * 3,1);
-                    for j=1:length(relevantTracksIds)
+                    for j=1:length(relevantTracksIds)                        
                         % Getting the current track.
                         currentTrack = tracks(relevantTracksIds(j));
-                        
+                                               
                         % Getting the current position.
                         currentPos = find(currentTrack.path(:,1) == i);
                         
@@ -1420,6 +1645,7 @@ classdef VideoTracker < handle
                         handles(j * 3) = text(path(currentPos,2),path(currentPos,3) - 30, ...
                             num2str(currentTrack.id),'color',[1 0 1]);
                     end
+
                     
                     % If we want to show center of mass.
                     if (showCenterOfMass == 1)
@@ -1467,6 +1693,12 @@ classdef VideoTracker < handle
                         2/3 * roundDimensions(1),...
                         3/3 * roundDimensions(1)];
                     
+                    % Once chan choose to put ticks accrdoing to the size
+                    % of the field.
+                    xTicks = [];
+                    yTicks = [];
+      
+                             
                     set(gca,'XTick',xTicks);
                     set(gca,'XTickLabel',sprintf('%1d|',round(xTicks / normalizedPixlPerCm)));
                     set(gca,'YTick',yTicks);
@@ -1476,9 +1708,9 @@ classdef VideoTracker < handle
                 set(gca,'FontSize',16);
                 set(gca,'FontWeight','bold');
                 
-                title(obj.name);
-                xlabel('X (pixels)');
-                ylabel('Y (pixels)');
+                %title(obj.name);
+                %xlabel('X (pixels)');
+                %ylabel('Y (pixels)');
                 
                 if (saveVideo)
                     frameImage = getframe(f);
@@ -1811,5 +2043,11 @@ classdef VideoTracker < handle
         
         
     end
+    % This is being called when an object is being loaded from a file.s
+    methods (Static)
+      function obj = loadobj(s)
+        s.initialize();
+      end
+   end
 end
 
