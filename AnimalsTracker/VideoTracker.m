@@ -337,6 +337,7 @@ classdef VideoTracker < handle
             obj.learner.minValues = minCol;
             
             obj.learner.meanCentroid = mean(allFeatures,1);
+            %DEBUG!! Uncomment
             obj.learner.covMat = eye(size(allFeatures,2)) .* cov(allFeatures);
             
             obj.learner.invCov = obj.learner.covMat / eye(length(obj.learner.covMat));
@@ -917,10 +918,13 @@ classdef VideoTracker < handle
                 end
             end
             
-                       
-            
             %Tracks filtering
             disp('Filtering tracks.');
+            
+            % No tracks to filter.
+            if (numberOfTracks == 0)
+                return;
+            end
             
             % Clear unimportant tracks.
             %pathPolyArea = arrayfun(@(t) polyarea(t.path(:,2), t.path(:,3)), obj.tracks);

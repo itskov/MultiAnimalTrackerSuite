@@ -786,11 +786,13 @@ button = 1;
 [~,features,extermas,idxs] = handles.videoTracker.extractFeatures2(handles.currentFrame, gaussianStd);
 
 % We're removing some quantile of the biggest areas in the video.
-AREA_QUANTILE_REMOVE = 0.99;
+AREA_QUANTILE_REMOVE = 0.999;
 areas = cellfun(@(exterma) polyarea(exterma(:,1),exterma(:,2)), extermas);
 thresholdArea = quantile(areas,AREA_QUANTILE_REMOVE);
+
 features(areas > thresholdArea,:) = [];
 extermas(areas > thresholdArea,:) = [];
+
 idxs(areas > thresholdArea,:) = [];
 
 
@@ -809,7 +811,7 @@ while (button == 1)
     matchingRegions = cellfun(@(exterma) inpolygon(x,y,exterma(:,1), exterma(:,2)), extermas);
     
     % If we're inside more than one polygon.
-    if (sum(matchingRegions) > 1)
+    if (any(matchingRegions))
         ids = find(matchingRegions);
         areas = arrayfun(@(id) polyarea(extermas{id}(:,1),extermas{id}(:,2)), ids);
         [~,i] = min(areas);
